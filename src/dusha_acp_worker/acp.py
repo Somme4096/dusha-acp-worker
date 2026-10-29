@@ -106,7 +106,7 @@ class Agent:
         return next((item for item in self.config_options if item.get("id") == option_id), None)
 
     async def prompt(self, blocks: list[dict[str, Any]], on_segment: Segment) -> tuple[str, list[str]]:
-        """Runs one turn. Text between tool calls reaches `on_segment` as one message each."""
+        """Runs one turn. Only the text after the last tool call reaches `on_segment`."""
         if self.busy:
             raise RuntimeError("a turn is already running")
         self._text, self._sent, self._on_segment = [], [], on_segment
@@ -213,7 +213,7 @@ class Agent:
             if content.get("type") == "text":
                 self._text.append(str(content.get("text") or ""))
         elif kind == "tool_call":
-            await self._flush()
+            self._text = []
 
     async def _flush(self) -> None:
         text = "".join(self._text).strip()

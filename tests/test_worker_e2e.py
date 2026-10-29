@@ -24,11 +24,12 @@ async def test_a_burst_of_messages_becomes_one_turn_with_the_routing_env(harness
     assert harness.chat.typing_for == [DM]
 
 
-async def test_text_around_a_tool_call_arrives_as_separate_messages(harness):
+async def test_only_the_text_after_the_last_tool_call_is_sent(harness):
     bridge = harness.start()
     await bridge.handle(DM, "use a tool")
-    await harness.until(lambda: len(harness.chat.sent) == 2)
-    assert harness.chat.texts() == ["let me look", "found it"]
+    await harness.until(lambda: harness.chat.sent)
+    await asyncio.sleep(0.2)
+    assert harness.chat.texts() == ["found it"]
 
 
 async def test_images_reach_the_agent_and_permissions_are_allowed(harness):
