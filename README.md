@@ -45,6 +45,7 @@ headers = { X-Companion-Token = "${DUSHA_TOKEN}" }
 | --- | --- | --- |
 | `discord.token`, `discord.token_env` | `""`, `DISCORD_TOKEN` | Bot token, inline or from the environment. |
 | `discord.allowed_user_ids` | `[]` | Users who may talk to it. Empty lets anyone DM it. |
+| `discord.sync_commands` | `true` | Register the slash commands on start. |
 | `agent.command` | `["maki", "--trust", "acp", "--yolo"]` | Any ACP agent. Permission prompts are always allowed. |
 | `agent.cwd` | `.` | The agent's working directory, relative to the config file. |
 | `agent.env` | `{}` | Extra environment for the agent. |
@@ -69,6 +70,8 @@ headers = { X-Companion-Token = "${DUSHA_TOKEN}" }
 | `/sessions` | Lists stored sessions for the agent's working directory. |
 | `/resume <number\|id>` | Continues a stored session. |
 | `/help` | Lists these. |
+
+The worker registers these as Discord slash commands on start, which replaces every global command the bot application had, such as ones another bot program registered with the same token. Set `discord.sync_commands` to `false` to leave them alone. Typing a command as plain text works too.
 
 Other text, including unknown `/` words, goes to the agent. Messages sent during a turn wait for the next one.
 

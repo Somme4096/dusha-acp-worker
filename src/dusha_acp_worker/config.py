@@ -14,6 +14,7 @@ class DiscordConfig:
     token: str = ""
     token_env: str = "DISCORD_TOKEN"
     allowed_user_ids: list[int] = field(default_factory=list)
+    sync_commands: bool = True
 
     def resolved_token(self) -> str:
         return self.token or os.environ.get(self.token_env, "")

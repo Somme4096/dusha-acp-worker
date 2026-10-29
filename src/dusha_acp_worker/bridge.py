@@ -76,19 +76,25 @@ class Bridge:
         }
 
     async def handle(self, channel_id: int, text: str, images: list[Image] | None = None) -> None:
-        channel = self._channel(channel_id)
         name, _, rest = text.strip().partition(" ")
-        command = self.commands.get(name[1:].lower()) if name.startswith("/") and not images else None
-        if command is not None:
-            try:
-                reply = await command(channel, rest.strip())
-            except Exception as error:
-                logger.exception("command %s failed", name)
-                reply = f"{name} failed: {error}"
-            await self.chat.send(channel_id, reply)
+        if name.startswith("/") and name[1:].lower() in self.commands and not images:
+            await self.chat.send(channel_id, await self.command(channel_id, name[1:].lower(), rest.strip()))
             return
+        channel = self._channel(channel_id)
         channel.inbox.append(Incoming(text, list(images or [])))
         channel.wake.set()
+
+    async def command(self, channel_id: int, name: str, argument: str = "") -> str:
+        try:
+            return await self.commands[name](self._channel(channel_id), argument)
+        except Exception as error:
+            logger.exception("command /%s failed", name)
+            return f"/{name} failed: {error}"
+
+    def models(self, channel_id: int) -> list[str]:
+        channel = self.channels.get(channel_id)
+        option = channel.agent.option("model") if channel and channel.agent else None
+        return [str(item.get("value")) for item in (option or {}).get("options") or []]
 
     async def run_proactive(self) -> None:
         if self.dusha is None:
