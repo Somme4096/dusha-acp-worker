@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any
@@ -132,6 +133,10 @@ class DiscordChat(discord.Client):
         channel = await self._channel(channel_id)
         for part in chunks(text):
             await channel.send(part)
+
+    async def send_file(self, channel_id: int, name: str, data: bytes) -> None:
+        channel = await self._channel(channel_id)
+        await channel.send(file=discord.File(io.BytesIO(data), filename=name))
 
     def typing(self, channel_id: int) -> AbstractAsyncContextManager[Any]:
         @asynccontextmanager

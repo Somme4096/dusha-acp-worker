@@ -31,6 +31,8 @@ HELP = """Commands:
 class Chat(Protocol):
     async def send(self, channel_id: int, text: str) -> None: ...
 
+    async def send_file(self, channel_id: int, name: str, data: bytes) -> None: ...
+
     def typing(self, channel_id: int) -> AbstractAsyncContextManager[Any]: ...
 
 
@@ -64,6 +66,7 @@ class Bridge:
         self.dusha = dusha
         self.channels: dict[int, Channel] = {}
         self.state = self._load_state()
+        self.clip_lock = asyncio.Lock()
         self.commands: dict[str, Callable[[Channel, str], Awaitable[str]]] = {
             "new": self._new,
             "stop": self._stop,
@@ -104,12 +107,26 @@ class Bridge:
                 await self.poll_once()
             except Exception as error:
                 logger.warning("proactive poll failed: %s", error)
+            await self.send_clips()
             await asyncio.sleep(max(5.0, self.config.dusha.poll_interval_seconds))
 
     async def poll_once(self) -> None:
         assert self.dusha is not None
         for event in await self.dusha.poll():
             await self._deliver(event)
+
+    async def send_clips(self) -> None:
+        if self.dusha is None:
+            return
+        async with self.clip_lock:
+            try:
+                for clip in await self.dusha.clips(ROUTE_PREFIX):
+                    channel_id = int(clip["route"].removeprefix(ROUTE_PREFIX))
+                    data = base64.b64decode(clip["data"])
+                    await self.chat.send_file(channel_id, f"voice.{clip['format']}", data)
+                    await self.dusha.clip_sent(clip["id"])
+            except Exception as error:
+                logger.warning("voice clip delivery failed: %s", error)
 
     async def close(self) -> None:
         for channel in self.channels.values():
@@ -165,6 +182,7 @@ class Bridge:
         finally:
             if not agent.alive:
                 await self._drop_agent(channel)
+        await self.send_clips()
         return sent
 
     # Agent lifecycle.

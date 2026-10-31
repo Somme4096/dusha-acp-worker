@@ -79,6 +79,10 @@ Other text, including unknown `/` words, goes to the agent. Messages sent during
 
 Needs [better_proactive](https://github.com/Somme4096/dusha-plugin-collections/tree/main/better_proactive) on the server, which needs dusha's `claim` hook. The worker polls an event, and when the target channel is idle it sends the event's `claim_marker` and `generation_instruction` to the agent as a turn. dusha stores that turn as an `event`, not as a user message, so affect and silence stay untouched. The agent writes the message with its own tools and history, the worker posts it, and acknowledges `sent`. A busy channel releases the event, a route that is not `discord:<id>` or an empty reply fails it.
 
+## Voice clips
+
+When [voice](https://github.com/Somme4096/dusha-plugin-collections/tree/main/voice) holds a clip for a `discord:` route, the worker uploads it to that DM as a file after each turn and on every proactive poll, then deletes it from the server. A clip that can't be sent stays there and is retried until voice's `clip_ttl_seconds`.
+
 ## Develop
 
 ```sh

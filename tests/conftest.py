@@ -21,9 +21,13 @@ class FakeChat:
     def __init__(self):
         self.sent: list[tuple[int, str]] = []
         self.typing_for: list[int] = []
+        self.files: list[tuple[int, str, bytes]] = []
 
     async def send(self, channel_id: int, text: str) -> None:
         self.sent.append((channel_id, text))
+
+    async def send_file(self, channel_id: int, name: str, data: bytes) -> None:
+        self.files.append((channel_id, name, data))
 
     def typing(self, channel_id: int):
         @asynccontextmanager
@@ -43,8 +47,16 @@ class FakeDusha:
     def __init__(self):
         self.pending: list[dict[str, Any]] = []
         self.acks: list[dict[str, Any]] = []
+        self.clips: list[dict[str, Any]] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/state/v1/voice/outbox":
+            assert request.url.params["prefix"] == "discord:"
+            return httpx.Response(200, json={"clips": self.clips})
+        if request.method == "DELETE":
+            clip_id = request.url.path.split("/")[-1]
+            self.clips = [clip for clip in self.clips if clip["id"] != clip_id]
+            return httpx.Response(200, json={"id": clip_id})
         if request.method == "GET":
             assert request.url.params["consumer"] == "worker"
             assert request.headers["x-companion-token"] == "secret"

@@ -35,5 +35,16 @@ class Dusha:
         )
         response.raise_for_status()
 
+    async def clips(self, prefix: str) -> list[dict[str, Any]]:
+        response = await self.http.get("/state/v1/voice/outbox", params={"prefix": prefix})
+        if response.status_code in {404, 503}:
+            return []
+        response.raise_for_status()
+        return list(response.json().get("clips") or [])
+
+    async def clip_sent(self, clip_id: str) -> None:
+        response = await self.http.delete(f"/state/v1/voice/outbox/{clip_id}")
+        response.raise_for_status()
+
     async def close(self) -> None:
         await self.http.aclose()

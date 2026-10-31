@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 
 from dusha_acp_worker.bridge import Image
@@ -183,3 +184,14 @@ async def test_messages_during_a_turn_wait_for_the_next_one(harness):
     await bridge.handle(DM, "/stop")
     await harness.until(lambda: len(harness.records("prompt")) == 2)
     assert harness.records("prompt")[1]["text"] == "later"
+
+
+async def test_a_voice_clip_is_uploaded_after_the_turn_and_only_once(harness):
+    bridge = harness.start()
+    data = base64.b64encode(b"RIFF").decode()
+    harness.dusha.clips = [{"id": "c1", "route": f"discord:{DM}", "format": "wav", "data": data}]
+    await bridge.handle(DM, "hey")
+    await harness.until(lambda: harness.chat.files)
+    await bridge.send_clips()
+    assert harness.chat.files == [(DM, "voice.wav", b"RIFF")]
+    assert harness.dusha.clips == []
