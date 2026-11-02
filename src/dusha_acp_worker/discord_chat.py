@@ -24,6 +24,8 @@ COMMANDS = {
     "build": "Switch to build mode",
     "sessions": "List stored sessions",
     "resume": "Continue a stored session",
+    "where": "Show which device runs the agent",
+    "here": "Pin the agent to a device, or auto to follow presence",
     "help": "List the commands",
 }
 
@@ -44,13 +46,16 @@ def chunks(text: str, limit: int = LIMIT) -> list[str]:
 
 
 class DiscordChat(discord.Client):
+    name = "Discord"
+    prefix = "discord:"
+
     def __init__(self, config: Config):
         intents = discord.Intents.none()
         intents.dm_messages = True
         intents.message_content = True
         super().__init__(intents=intents)
         self.config = config
-        self.bridge = Bridge(config, self, Dusha(config.dusha) if config.dusha.url else None)
+        self.bridge = Bridge(config, self, Dusha(config.dusha))
         self._proactive: asyncio.Task[None] | None = None
         self.tree = app_commands.CommandTree(self)
         for command in self._commands():
@@ -72,7 +77,10 @@ class DiscordChat(discord.Client):
         async def resume(interaction: discord.Interaction, session: str) -> None:
             await self._run(interaction, "resume", session)
 
-        callbacks = {"model": model, "resume": resume}
+        async def here(interaction: discord.Interaction, device: str) -> None:
+            await self._run(interaction, "here", device)
+
+        callbacks = {"model": model, "resume": resume, "here": here}
         commands = []
         for name, description in COMMANDS.items():
             command = app_commands.Command(
@@ -84,6 +92,7 @@ class DiscordChat(discord.Client):
         named["model"].autocomplete("spec")(self._model_names)
         app_commands.describe(spec="A model spec such as provider/model-id")(named["model"])
         app_commands.describe(session="A number from /sessions, or a session id")(named["resume"])
+        app_commands.describe(device="A device name from presence, or auto")(named["here"])
         return commands
 
     async def _model_names(

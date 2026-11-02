@@ -3,13 +3,6 @@
     "token_env": "DISCORD_TOKEN",
     "allowed_user_ids": [123456789012345678]
   },
-  "agent": {
-    "command": ["maki", "--trust", "acp", "--yolo"],
-    "cwd": "~/companion",
-    "env": {},
-    "mode": "build",
-    "model": ""
-  },
   "dusha": {
     "url": "http://127.0.0.1:8765",
     "token_env": "DUSHA_TOKEN",

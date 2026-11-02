@@ -11,13 +11,11 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from .acp import AcpError, Agent
 from .config import Config
-from .dusha import Dusha
+from .dusha import Dusha, DushaError
 
 logger = logging.getLogger("dusha_acp_worker")
 
-ROUTE_PREFIX = "discord:"
 HELP = """Commands:
 /new  start a fresh session
 /stop  stop the running turn
@@ -25,10 +23,15 @@ HELP = """Commands:
 /plan, /build  switch the agent's mode
 /sessions  list stored sessions
 /resume <number|id>  continue a stored session
+/where  show which device runs the agent
+/here <device|auto>  pin the agent to a device, or follow presence
 /help  this list"""
 
 
 class Chat(Protocol):
+    name: str
+    prefix: str
+
     async def send(self, channel_id: int, text: str) -> None: ...
 
     async def send_file(self, channel_id: int, name: str, data: bytes) -> None: ...
@@ -54,13 +57,14 @@ class Channel:
     inbox: list[Incoming] = field(default_factory=list)
     wake: asyncio.Event = field(default_factory=asyncio.Event)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    agent: Agent | None = None
     task: asyncio.Task[None] | None = None
+    busy: bool = False
     listed: list[dict[str, Any]] = field(default_factory=list)
+    models: list[str] = field(default_factory=list)
 
 
 class Bridge:
-    def __init__(self, config: Config, chat: Chat, dusha: Dusha | None = None):
+    def __init__(self, config: Config, chat: Chat, dusha: Dusha):
         self.config = config
         self.chat = chat
         self.dusha = dusha
@@ -75,6 +79,8 @@ class Bridge:
             "build": lambda channel, _: self._mode(channel, "build"),
             "sessions": self._sessions,
             "resume": self._resume,
+            "where": lambda channel, _: self._where(),
+            "here": lambda channel, device: self._here(device),
             "help": lambda channel, _: self._help(),
         }
 
@@ -96,12 +102,9 @@ class Bridge:
 
     def models(self, channel_id: int) -> list[str]:
         channel = self.channels.get(channel_id)
-        option = channel.agent.option("model") if channel and channel.agent else None
-        return [str(item.get("value")) for item in (option or {}).get("options") or []]
+        return list(channel.models) if channel else []
 
     async def run_proactive(self) -> None:
-        if self.dusha is None:
-            return
         while True:
             try:
                 await self.poll_once()
@@ -111,17 +114,14 @@ class Bridge:
             await asyncio.sleep(max(5.0, self.config.dusha.poll_interval_seconds))
 
     async def poll_once(self) -> None:
-        assert self.dusha is not None
         for event in await self.dusha.poll():
             await self._deliver(event)
 
     async def send_clips(self) -> None:
-        if self.dusha is None:
-            return
         async with self.clip_lock:
             try:
-                for clip in await self.dusha.clips(ROUTE_PREFIX):
-                    channel_id = int(clip["route"].removeprefix(ROUTE_PREFIX))
+                for clip in await self.dusha.clips(self.chat.prefix):
+                    channel_id = int(clip["route"].removeprefix(self.chat.prefix))
                     data = base64.b64decode(clip["data"])
                     await self.chat.send_file(channel_id, f"voice.{clip['format']}", data)
                     await self.dusha.clip_sent(clip["id"])
@@ -132,9 +132,7 @@ class Bridge:
         for channel in self.channels.values():
             if channel.task is not None:
                 channel.task.cancel()
-            await self._drop_agent(channel)
-        if self.dusha is not None:
-            await self.dusha.close()
+        await self.dusha.close()
 
     # Turns.
 
@@ -155,98 +153,59 @@ class Bridge:
                 if not batch:
                     continue
                 try:
-                    await self._agent(channel)
-                    await self._turn(channel, self._blocks(channel, batch))
+                    await self._turn(channel, self._blocks(batch))
                 except Exception as error:
                     logger.exception("turn failed in channel %s", channel.id)
                     await self.chat.send(channel.id, f"The agent failed: {error}")
 
-    def _blocks(self, channel: Channel, batch: list[Incoming]) -> list[dict[str, Any]]:
+    def _blocks(self, batch: list[Incoming]) -> list[dict[str, Any]]:
         text = "\n".join(item.text for item in batch if item.text.strip())
         blocks: list[dict[str, Any]] = [{"type": "text", "text": text}] if text else []
-        capabilities = channel.agent.capabilities if channel.agent else {}
-        vision = bool((capabilities.get("promptCapabilities") or {}).get("image"))
         for item in batch:
-            for image in item.images if vision else []:
+            for image in item.images:
                 data = base64.b64encode(image.data).decode()
                 blocks.append({"type": "image", "mimeType": image.mime_type, "data": data})
         return blocks
 
-    async def _turn(self, channel: Channel, blocks: list[dict[str, Any]]) -> list[str]:
-        agent = await self._agent(channel)
+    async def _turn(
+        self, channel: Channel, blocks: list[dict[str, Any]], proactive: bool = False
+    ) -> list[str]:
         if not blocks:
             return []
+        target = self._target(channel)
+        text = ""
+        channel.busy = True
         try:
             async with self.chat.typing(channel.id):
-                _, sent = await agent.prompt(blocks, lambda text: self.chat.send(channel.id, text))
+                async for event in self.dusha.turn({**target, "proactive": proactive}, blocks):
+                    kind = event.get("event")
+                    if kind == "start":
+                        self.state["conversations"][str(event["session_id"])] = target["conversation_id"]
+                        self._save_state()
+                    elif kind == "error":
+                        raise DushaError(str(event.get("message") or "the turn failed"))
+                    elif kind == "done":
+                        text = str(event.get("text") or "")
         finally:
-            if not agent.alive:
-                await self._drop_agent(channel)
+            channel.busy = False
+        if text:
+            await self.chat.send(channel.id, text)
         await self.send_clips()
-        return sent
-
-    # Agent lifecycle.
+        return [text] if text else []
 
     def _saved(self, channel: Channel) -> dict[str, Any]:
         return self.state["channels"].setdefault(str(channel.id), {})
 
-    async def _agent(self, channel: Channel) -> Agent:
-        if channel.agent is not None and channel.agent.alive:
-            return channel.agent
-        await self._drop_agent(channel)
+    def _target(self, channel: Channel) -> dict[str, Any]:
         saved = self._saved(channel)
         if not saved.get("conversation_id"):
             saved["conversation_id"] = f"{self.config.dusha.harness}-{channel.id}-{uuid.uuid4().hex[:8]}"
-        agent = await self._spawn(channel, saved)
-        if saved.get("session_id"):
-            try:
-                await agent.load_session(saved["session_id"])
-            except AcpError as error:
-                logger.warning("could not load session %s, starting fresh: %s", saved["session_id"], error)
-                await agent.close()
-                saved.pop("session_id")
-                saved["conversation_id"] = f"{self.config.dusha.harness}-{channel.id}-{uuid.uuid4().hex[:8]}"
-                agent = await self._spawn(channel, saved)
-        if not agent.session_id:
-            await agent.new_session()
-        saved["session_id"] = agent.session_id
-        self.state["conversations"][agent.session_id] = saved["conversation_id"]
-        mode = saved.get("mode") or self.config.agent.mode
-        if agent.modes and agent.modes.get("currentModeId") != mode:
-            await agent.set_mode(mode)
-        model = saved.get("model") or self.config.agent.model
-        current = (agent.option("model") or {}).get("currentValue")
-        if model and current is not None and current != model:
-            await agent.set_model(model)
-        channel.agent = agent
-        self._save_state()
-        return agent
-
-    async def _spawn(self, channel: Channel, saved: dict[str, Any]) -> Agent:
-        env = {
-            **self.config.agent.env,
-            "DUSHA_CONVERSATION_ID": saved["conversation_id"],
-            "DUSHA_ROUTE": f"{ROUTE_PREFIX}{channel.id}",
-            "DUSHA_HARNESS": self.config.dusha.harness,
+            self._save_state()
+        return {
+            "conversation_id": saved["conversation_id"],
+            "route": f"{self.chat.prefix}{channel.id}",
+            "harness": self.config.dusha.harness,
         }
-        agent = Agent(self.config.agent.command, self.config.cwd, env)
-        try:
-            await agent.start()
-        except Exception:
-            await agent.close()
-            raise
-        return agent
-
-    async def _drop_agent(self, channel: Channel) -> None:
-        agent, channel.agent = channel.agent, None
-        if agent is not None:
-            await agent.close()
-
-    async def _ready(self, channel: Channel) -> Agent:
-        if channel.agent is not None and channel.agent.alive:
-            return channel.agent
-        async with channel.lock:
-            return await self._agent(channel)
 
     # Commands.
 
@@ -254,50 +213,40 @@ class Bridge:
         await self._stop(channel, "")
         async with channel.lock:
             channel.inbox.clear()
-            await self._drop_agent(channel)
-            saved = self._saved(channel)
-            saved.pop("session_id", None)
-            saved.pop("conversation_id", None)
-            saved.pop("mode", None)
+            if self._saved(channel).get("conversation_id"):
+                await self.dusha.acp("reset", self._target(channel))
+            self._saved(channel).pop("conversation_id", None)
             self._save_state()
         return "Started a new session."
 
     async def _stop(self, channel: Channel, _: str) -> str:
-        if channel.agent is not None and channel.agent.busy:
-            await channel.agent.cancel()
+        if channel.busy and (await self.dusha.acp("cancel", self._target(channel))).get("cancelled"):
             return "Stopped."
         return "Nothing is running."
 
     async def _model(self, channel: Channel, spec: str) -> str:
-        agent = await self._ready(channel)
+        shown = await self.dusha.acp("config", self._target(channel), model=spec)
+        channel.models = list(shown.get("models") or [])
         if spec:
-            await agent.set_model(spec)
-            self._saved(channel)["model"] = spec
-            self._save_state()
             return f"Model: {spec}"
-        option = agent.option("model")
-        if option is None:
+        if shown.get("model") is None:
             return "This agent offers no model choice."
-        names = [str(item.get("value")) for item in option.get("options") or []]
-        listing = "\n".join(f"- {name}" for name in names[:30])
-        more = f"\n…and {len(names) - 30} more" if len(names) > 30 else ""
-        return f"Model: {option.get('currentValue')}\n{listing}{more}"
+        listing = "\n".join(f"- {name}" for name in channel.models[:30])
+        more = f"\n…and {len(channel.models) - 30} more" if len(channel.models) > 30 else ""
+        return f"Model: {shown['model']}\n{listing}{more}"
 
     async def _mode(self, channel: Channel, mode: str) -> str:
-        agent = await self._ready(channel)
-        await agent.set_mode(mode)
-        self._saved(channel)["mode"] = mode
-        self._save_state()
+        await self.dusha.acp("config", self._target(channel), mode=mode)
         return f"Mode: {mode}"
 
     async def _sessions(self, channel: Channel, _: str) -> str:
-        agent = await self._ready(channel)
-        channel.listed = (await agent.list_sessions())[:15]
+        listed = await self.dusha.acp("sessions", self._target(channel))
+        channel.listed = list(listed.get("sessions") or [])
         if not channel.listed:
             return "No stored sessions."
         lines = []
         for index, item in enumerate(channel.listed, start=1):
-            here = " (current)" if item.get("sessionId") == agent.session_id else ""
+            here = " (current)" if item.get("sessionId") == listed.get("current") else ""
             title = item.get("title") or item.get("sessionId")
             lines.append(f"{index}. {title} · {item.get('updatedAt') or ''}{here}")
         return "\n".join(lines) + "\nUse /resume <number>."
@@ -314,16 +263,28 @@ class Bridge:
         await self._stop(channel, "")
         async with channel.lock:
             channel.inbox.clear()
-            await self._drop_agent(channel)
-            saved = self._saved(channel)
-            saved["session_id"] = session_id
-            saved["conversation_id"] = self.state["conversations"].get(
+            self._saved(channel)["conversation_id"] = self.state["conversations"].get(
                 session_id, f"{self.config.dusha.harness}-{session_id}"
             )
-            agent = await self._agent(channel)
-        if agent.session_id != session_id:
+            self._save_state()
+            resumed = await self.dusha.acp("resume", self._target(channel), session_id=session_id)
+        if resumed.get("session_id") != session_id:
             return "That session could not be loaded, started a new one."
         return f"Resumed {session_id}."
+
+    async def _where(self) -> str:
+        info = await self.dusha.executor()
+        if info["pinned"] != "auto":
+            return f"Running on {info['device']}, pinned. Use /here auto to follow presence."
+        return f"Running on {info['device']}, following presence. Home is {info['home']}."
+
+    async def _here(self, device: str) -> str:
+        if not device:
+            return "Usage: /here <device|auto>, see /where."
+        info = await self.dusha.executor(device)
+        if device == "auto":
+            return f"Following presence, running on {info['device']}."
+        return f"Pinned to {device}, running on {info['device']}."
 
     async def _help(self) -> str:
         return HELP
@@ -331,11 +292,10 @@ class Bridge:
     # Proactive.
 
     async def _deliver(self, event: dict[str, Any]) -> None:
-        assert self.dusha is not None
         route = str((event.get("target") or {}).get("route") or "")
-        target = route.removeprefix(ROUTE_PREFIX)
-        if not route.startswith(ROUTE_PREFIX) or not target.isdigit():
-            await self.dusha.ack(event["id"], "failed", error=f"not a Discord route: {route!r}")
+        target = route.removeprefix(self.chat.prefix)
+        if not route.startswith(self.chat.prefix) or not target.isdigit():
+            await self.dusha.ack(event["id"], "failed", error=f"not a {self.chat.name} route: {route!r}")
             return
         marker = event.get("claim_marker")
         if not marker:
@@ -350,7 +310,7 @@ class Bridge:
         blocks = [{"type": "text", "text": f"{marker}\n{event.get('generation_instruction') or ''}"}]
         async with channel.lock:
             try:
-                sent = await self._turn(channel, blocks)
+                sent = await self._turn(channel, blocks, proactive=True)
             except Exception as error:
                 logger.exception("proactive turn failed in channel %s", channel.id)
                 await self.dusha.ack(event["id"], "failed", error=str(error))

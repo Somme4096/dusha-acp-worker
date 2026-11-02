@@ -6,8 +6,6 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
-DEFAULT_COMMAND = ["maki", "--trust", "acp", "--yolo"]
-
 
 @dataclass
 class DiscordConfig:
@@ -18,15 +16,6 @@ class DiscordConfig:
 
     def resolved_token(self) -> str:
         return self.token or os.environ.get(self.token_env, "")
-
-
-@dataclass
-class AgentConfig:
-    command: list[str] = field(default_factory=lambda: list(DEFAULT_COMMAND))
-    cwd: str = "."
-    env: dict[str, str] = field(default_factory=dict)
-    mode: str = "build"
-    model: str = ""
 
 
 @dataclass
@@ -45,15 +34,10 @@ class DushaConfig:
 @dataclass
 class Config:
     discord: DiscordConfig = field(default_factory=DiscordConfig)
-    agent: AgentConfig = field(default_factory=AgentConfig)
     dusha: DushaConfig = field(default_factory=DushaConfig)
     debounce_seconds: float = 2.0
     state_file: str = "state.json"
     base_dir: Path = field(default_factory=Path.cwd)
-
-    @property
-    def cwd(self) -> str:
-        return str((self.base_dir / Path(self.agent.cwd).expanduser()).resolve())
 
     @property
     def state_path(self) -> Path:
@@ -72,14 +56,16 @@ def _section(kind: type, raw: Any, name: str) -> Any:
 
 def parse(raw: dict[str, Any], base_dir: Path) -> Config:
     raw = dict(raw)
-    sections = {"discord": DiscordConfig, "agent": AgentConfig, "dusha": DushaConfig}
+    if "agent" in raw:
+        raise ValueError("'agent' moved to the acp plugin of dusha-plugin-collections, see the README")
+    sections = {"discord": DiscordConfig, "dusha": DushaConfig}
     parts = {name: _section(kind, raw.pop(name, {}), name) for name, kind in sections.items()}
     config = _section(Config, raw, "config")
     for name, value in parts.items():
         setattr(config, name, value)
     config.base_dir = base_dir
-    if config.agent.mode not in {"build", "plan"}:
-        raise ValueError("'agent.mode' must be 'build' or 'plan'")
+    if not config.dusha.url:
+        raise ValueError("'dusha.url' is required, it runs the agent")
     return config
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import socket
 
 from dusha_acp_worker.bridge import Image
 
@@ -68,7 +69,7 @@ async def test_stop_cancels_the_running_turn(harness):
     await harness.until(lambda: harness.chat.texts()[-1] == "Nothing is running.")
 
 
-async def test_a_restart_loads_the_saved_session_with_its_model_and_mode(harness):
+async def test_a_restart_keeps_the_session_with_its_model_and_mode(harness):
     bridge = harness.start()
     await bridge.handle(DM, "/model")
     assert harness.chat.texts()[-1] == "Model: fake/small\n- fake/small\n- fake/large"
@@ -81,15 +82,11 @@ async def test_a_restart_loads_the_saved_session_with_its_model_and_mode(harness
     bridge = await harness.restart()
     await bridge.handle(DM, "again")
     await harness.until(lambda: harness.records("prompt"))
-    [load] = harness.records("load")
     [prompt] = harness.records("prompt")
-    assert load["session"] == new["session"] == prompt["session"]
+    assert new["session"] == prompt["session"]
     assert prompt["model"] == "fake/large" and prompt["mode"] == "plan"
     state = json.loads((harness.tmp_path / "state.json").read_text())
     assert state["conversations"][new["session"]] == prompt["env"]["DUSHA_CONVERSATION_ID"]
-    # Replayed history during load never reaches the chat.
-    await harness.until(lambda: len(harness.chat.sent) == 5)
-    assert "replayed history" not in harness.chat.texts()
 
 
 async def test_sessions_and_resume_switch_back_to_an_earlier_conversation(harness):
@@ -195,3 +192,14 @@ async def test_a_voice_clip_is_uploaded_after_the_turn_and_only_once(harness):
     await bridge.send_clips()
     assert harness.chat.files == [(DM, "voice.wav", b"RIFF")]
     assert harness.dusha.clips == []
+
+
+async def test_where_and_here_show_and_pin_the_device(harness):
+    bridge = harness.start()
+    await bridge.handle(DM, "/where")
+    host = socket.gethostname().split(".")[0]
+    assert harness.chat.texts() == [f"Running on {host}, following presence. Home is {host}."]
+    await bridge.handle(DM, "/here nowhere")
+    assert harness.chat.texts()[-1].startswith("/here failed: unknown device 'nowhere'")
+    await bridge.handle(DM, "/here auto")
+    assert harness.chat.texts()[-1].startswith("Following presence, running on ")
