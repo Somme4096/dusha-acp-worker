@@ -90,7 +90,10 @@ class Bridge:
             await self.chat.send(channel_id, await self.command(channel_id, name[1:].lower(), rest.strip()))
             return
         channel = self._channel(channel_id)
-        channel.inbox.append(Incoming(text, list(images or [])))
+        incoming = Incoming(text, list(images or []))
+        if channel.busy and not channel.inbox and await self._steer(channel, incoming):
+            return
+        channel.inbox.append(incoming)
         channel.wake.set()
 
     async def command(self, channel_id: int, name: str, argument: str = "") -> str:
@@ -157,6 +160,17 @@ class Bridge:
                 except Exception as error:
                     logger.exception("turn failed in channel %s", channel.id)
                     await self.chat.send(channel.id, f"The agent failed: {error}")
+
+    async def _steer(self, channel: Channel, incoming: Incoming) -> bool:
+        blocks = self._blocks([incoming])
+        if not blocks:
+            return False
+        try:
+            steered = await self.dusha.acp("steer", self._target(channel), prompt=blocks)
+        except Exception as error:
+            logger.warning("could not steer the turn in channel %s, queueing it: %s", channel.id, error)
+            return False
+        return bool(steered.get("steered"))
 
     def _blocks(self, batch: list[Incoming]) -> list[dict[str, Any]]:
         text = "\n".join(item.text for item in batch if item.text.strip())

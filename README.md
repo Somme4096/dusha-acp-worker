@@ -11,6 +11,8 @@ Discord DM ──► dusha-acp-worker ──SSE──► hub: acp plugin ──�
 
 The hub runs a turn on a device once you have been active there for the plugin's `switch_after_minutes`, and goes back home when you leave it. Each switch starts a new session, which dusha fills with the latest messages, and offers a `device_switch` proactive candidate so the agent can tell you if it wants to.
 
+A message that arrives while a turn runs steers that turn through `POST /state/v1/acp/steer`. The hub cancels the agent's current prompt and prompts again with your message in the same session, so the turn goes on and its one reply answers both. A hub without that route gets the message as the next turn.
+
 ## Run
 
 ```sh

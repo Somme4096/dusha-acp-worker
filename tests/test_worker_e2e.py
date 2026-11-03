@@ -69,6 +69,20 @@ async def test_stop_cancels_the_running_turn(harness):
     await harness.until(lambda: harness.chat.texts()[-1] == "Nothing is running.")
 
 
+async def test_a_message_during_a_turn_steers_it(harness):
+    bridge = harness.start()
+    await bridge.handle(DM, "be slow")
+    await harness.until(lambda: harness.records("prompt"))
+    await bridge.handle(DM, "actually, this")
+    await harness.until(lambda: harness.chat.sent)
+    await asyncio.sleep(0.4)
+    first, second = harness.records("prompt")
+    assert second["text"] == "actually, this"
+    assert first["session"] == second["session"] and first["pid"] == second["pid"]
+    assert harness.chat.texts() == ["echo: actually, this"]
+    assert harness.chat.typing_for == [DM]
+
+
 async def test_a_restart_keeps_the_session_with_its_model_and_mode(harness):
     bridge = harness.start()
     await bridge.handle(DM, "/model")
@@ -169,18 +183,6 @@ async def test_a_proactive_turn_with_no_words_fails(harness):
     assert harness.dusha.acks[0]["outcome"] == "failed"
     assert harness.dusha.acks[0]["error"] == "the agent wrote nothing"
     assert harness.chat.sent == []
-
-
-async def test_messages_during_a_turn_wait_for_the_next_one(harness):
-    bridge = harness.start()
-    await bridge.handle(DM, "be slow")
-    await harness.until(lambda: harness.records("prompt"))
-    await bridge.handle(DM, "later")
-    await asyncio.sleep(0.4)
-    assert len(harness.records("prompt")) == 1
-    await bridge.handle(DM, "/stop")
-    await harness.until(lambda: len(harness.records("prompt")) == 2)
-    assert harness.records("prompt")[1]["text"] == "later"
 
 
 async def test_a_voice_clip_is_uploaded_after_the_turn_and_only_once(harness):
